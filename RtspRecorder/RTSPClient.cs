@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using System.Net.Sockets;
 using System.Net;
 using System.Text.RegularExpressions;
+using System.IO;
 
 namespace RtspRecorder
 {
@@ -25,6 +26,10 @@ namespace RtspRecorder
         public string OutName { get; set; }
         public int RecDurLimit { get; set; } = 0;
         private TcpClient client;
+        private string title = "";
+        private string programid = "";
+        private string service_provider = "";
+        private string service_name = "";
 
         private RTSPClient()
         {
@@ -64,7 +69,7 @@ namespace RtspRecorder
 
         public void Connect()
         {
-            if (client != null && client.Connected) 
+            if (client != null && client.Connected)
                 client.Close();
             Console.Write("Connecting...");
             seq = 2;
@@ -88,7 +93,7 @@ namespace RtspRecorder
                     return;
 
                 recCount++;
-                if (RecDurLimit > 0 && recCount > RecDurLimit) 
+                if (RecDurLimit > 0 && recCount > RecDurLimit)
                 {
                     timer.Stop();
                     stopFlag = true;
@@ -96,7 +101,8 @@ namespace RtspRecorder
                 var size = Util.FormatFileSize(streamSize);
                 if (streamSize != streamSizeLast)
                 {
-                    if (!StdOut) Console.Write("\rReceiving... [" + Util.FormatTime(recCount) + $"] [{size}]" + "".PadRight(6));
+                    if (!StdOut)
+                        Console.Write("\rReceiving... [" + Util.FormatTime(recCount) + $"] [{size}]" + "".PadRight(6));
                     streamSizeLast = streamSize;
                 }
                 else
@@ -136,6 +142,10 @@ namespace RtspRecorder
             {
                 this.url = Regex.Match(resp2str, "Content-Base: (.*)").Groups[1].Value.Trim();
             }
+            if (Regex.IsMatch(resp2str, "s=(.*)"))
+            {
+                this.title= Regex.Match(resp2str, "s=(.*)").Groups[1].Value.Trim();
+            }
 
 
             //3.SETUP
@@ -163,7 +173,7 @@ namespace RtspRecorder
             {
                 OutName = $"{Util.GetValidFileName(Program)}_{DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff")}.ts";
             }
-            else if (!StdOut) 
+            else if (!StdOut)
             {
                 var fullPath = Path.GetFullPath(OutName);
                 var dir = Path.GetDirectoryName(fullPath);
@@ -174,29 +184,66 @@ namespace RtspRecorder
             Console.WriteLine($"Output... {OutName}");
 
             StartTimer();
-            
+
             var stream = client.GetStream();
             var reader = new BinaryReader(stream);
-            using var output = StdOut ? Console.OpenStandardOutput() : new FileStream(OutName, FileMode.Create);
-            using var bufferWriter = new BufferedStream(output, 2048);
+            var output = StdOut ? Console.OpenStandardOutput() : new FileStream(OutName, FileMode.Create);
+            var bufferWriter = new BufferedStream(output, 2048);
             /**           ___________________
              * TCP Header | 4 Bits          | TS Data (7*188)
              *            | $ | id | Length |
              *            -------------------
              */
-            while (true && !stopFlag) 
+
+           
+
+            while (true && !stopFlag)
             {
                 if (reader.ReadByte() == 0x24) //遇到4字节头
                 {
                     int interleaveId = reader.ReadByte();
-                    if (interleaveId == 0) 
+                    if (interleaveId == 0)
                     {
                         var arr = reader.ReadBytes(2);
                         if (BitConverter.IsLittleEndian)
                             Array.Reverse(arr);
                         int length = BitConverter.ToInt16(arr, 0);
                         var data = reader.ReadBytes(length); //TS data
-                        bufferWriter.Write(data);
+
+                        int i = 0;
+                        if (programid == "")
+                        {
+                            while (i < data.Length - 100)
+                            {
+                                if (data[i] == Convert.ToInt32("00", 16) && data[i + 1] == Convert.ToInt32("00", 16) && data[i + 2] == Convert.ToInt32("08", 16) && data[i + 3] == Convert.ToInt32("88", 16) && data[i + 4] == Convert.ToInt32("FF", 16))
+                                {
+                                    programid = Convert.ToInt32(BitConverter.ToString(data.Skip(i + 5).Take(2).ToArray(), 0).Replace("-", ""), 16).ToString();
+                                    Console.WriteLine("   title           : " + title);
+                                    Console.WriteLine("  Program " + programid);
+                                }
+                                if (data[i] == Convert.ToInt32("48", 16) && data[i + 2] == Convert.ToInt32("01", 16) && data[i + 3] == Convert.ToInt32("04", 16))
+                                {
+                                    i = i + 4;
+                                    int j = i;
+                                    while (data[j] != Convert.ToInt32("08", 16))
+                                    {
+                                        j++;
+                                    }
+                                    service_provider = Encoding.UTF8.GetString(data.Skip(i).Take(j - i).ToArray());
+                                    Console.WriteLine("   service_provider: " + service_provider);
+                                    i = j + 1;
+                                    while (data[j] != Convert.ToInt32("12", 16))
+                                    {
+                                        j++;
+                                    }
+                                    service_name = Encoding.UTF8.GetString(data.Skip(i).Take(j - i).ToArray());
+                                    Console.WriteLine("   service_name    : " + service_name);
+                                }
+                                i++;
+                            }
+                        }
+
+                        bufferWriter.Write(data, 0, data.Length);
                         streamSize += data.Length;
                     }
                 }
